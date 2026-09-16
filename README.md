@@ -107,10 +107,6 @@ Polly then states the recommended next steps—roll back the deployment or upsca
 
 ## Tech Stack
 
-Based on the provided architecture diagram, here is the tech stack section formatted for a GitHub `README.md`.
-
-## Tech Stack
-
 | Category | Technology | Purpose |
 | --- | --- | --- |
 | **Frontend & Hosting** | **Amazon S3** | Hosts the static website files (HTML/CSS/JS) for the web application. |
