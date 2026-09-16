@@ -2,7 +2,7 @@
 Voice-Driven AI Incident Commander for AWS Operations
 __________________________________________________________________________________________________________________________________
 
-A RAG Application.
+VoiceOPS AI User flow:
 
 - VOICE INPUT: User prompts UI → Transcribe Streaming outputs text live.
 - API TRIGGER: Frontend submits transcript to API Gateway POST /command.
