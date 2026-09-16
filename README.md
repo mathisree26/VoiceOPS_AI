@@ -2,7 +2,7 @@
 Voice-Driven AI Incident Commander for AWS Operations
 __________________________________________________________________________________________________________________________________
 
-A production-ready RAG Application.
+A RAG Application.
 
 - VOICE INPUT: User prompts UI → Transcribe Streaming outputs text live.
 - API TRIGGER: Frontend submits transcript to API Gateway POST /command.
