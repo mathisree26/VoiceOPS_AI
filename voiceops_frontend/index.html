@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>VoiceOps AI</title>
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+<body class = "auth-loading">
+  <div class="app-shell">
+    <header class="topbar">
+      <div>
+        <p class="eyebrow">AI SRE CONSOLE</p>
+        <h1>VoiceOps AI</h1>
+        <p class="subtitle">Monitor live CloudWatch service health, inspect evidence, and ask your incident commander by voice.</p>
+      </div>
+      <div class="status-pill" id="backendStatus" data-state="neutral">Backend: checking</div>
+    </header>
+
+    <main class="layout">
+      <section class="panel service-panel">
+        <div class="panel-heading service-heading">
+          <div>
+            <h2>Service health</h2>
+            <p id="serviceMeta">Loading live CloudWatch metrics…</p>
+          </div>
+          <button id="refreshServicesBtn" class="secondary-btn" type="button">Refresh</button>
+        </div>
+        <div id="serviceGrid" class="service-grid"></div>
+      </section>
+
+      <section class="panel chart-panel">
+        <div class="panel-heading">
+          <div>
+            <h2 id="chartTitle">Metric overview</h2>
+            <p id="chartSubtitle">Waiting for CloudWatch service data.</p>
+          </div>
+          <select id="metricSelect" aria-label="Select metric"></select>
+        </div>
+        <div class="chart-wrap">
+          <canvas id="metricChart"></canvas>
+          <div id="chartEmpty" class="chart-empty" hidden>No metric data is available.</div>
+        </div>
+      </section>
+
+      <section class="panel assistant-panel">
+        <div class="panel-heading">
+          <div>
+            <h2>Ask VoiceOps</h2>
+            <p id="selectedServiceLabel">No service selected</p>
+          </div>
+          <button id="clearContextBtn" class="ghost-btn" type="button">Clear context</button>
+        </div>
+
+        <div class="voice-row">
+          <button id="micBtn" class="mic-btn" type="button" aria-pressed="false">
+            <span class="mic-icon">🎙️</span>
+            <span id="micLabel">Start voice</span>
+          </button>
+          <div class="voice-state">
+            <span id="voiceDot" class="dot"></span>
+            <span id="voiceStatus">Idle</span>
+          </div>
+        </div>
+
+        <label class="field-label" for="queryInput">Question</label>
+        <textarea id="queryInput" rows="4" placeholder="e.g. Why is checkout-api unhealthy? Explain briefly."></textarea>
+
+        <div class="quick-actions">
+          <button class="chip" data-prompt="What is failing? Explain briefly." type="button">What is failing?</button>
+          <button class="chip" data-prompt="What changed recently?" type="button">What changed?</button>
+          <button class="chip" data-prompt="What should I do next?" type="button">Next action</button>
+          <button class="chip" data-prompt="Explain the incident in detail with evidence and remediation." type="button">Detailed analysis</button>
+        </div>
+
+        <div class="action-row">
+          <button id="askBtn" class="primary-btn" type="button">Ask VoiceOps</button>
+          <button id="stopAudioBtn" class="secondary-btn" type="button">Stop audio</button>
+        </div>
+      </section>
+
+      <section class="panel diagnosis-panel">
+        <div class="panel-heading">
+          <div>
+            <h2>AI diagnosis</h2>
+            <p>Issue, evidence, and next action from the backend.</p>
+          </div>
+          <span id="responseBadge" class="badge">Waiting</span>
+        </div>
+
+        <div id="diagnosis" class="diagnosis">
+          <div class="empty-state">Ask a question to see the diagnosis.</div>
+        </div>
+      </section>
+
+      <section class="panel evidence-panel">
+        <div class="panel-heading">
+          <div>
+            <h2>Evidence</h2>
+            <p>CloudWatch + Knowledge Base context used by VoiceOps.</p>
+          </div>
+        </div>
+        <div class="evidence-grid">
+          <div class="evidence-card">
+            <span class="evidence-label">Log events</span>
+            <strong id="logCount">—</strong>
+          </div>
+          <div class="evidence-card">
+            <span class="evidence-label">KB results</span>
+            <strong id="kbCount">—</strong>
+          </div>
+          <div class="evidence-card">
+            <span class="evidence-label">Metrics</span>
+            <strong id="metricCount">—</strong>
+          </div>
+        </div>
+        <pre id="metricEvidence" class="evidence-pre">No evidence yet.</pre>
+      </section>
+    </main>
+  </div>
+
+  <script src="./config.js"></script>
+  <script src="./bundle.js"></script>
+</body>
+</html>

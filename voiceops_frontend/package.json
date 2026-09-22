@@ -1,0 +1,17 @@
+{
+  "name": "voiceops-frontend",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "build": "esbuild app.js --bundle --platform=browser --format=iife --outfile=bundle.js"
+  },
+  "dependencies": {
+    "@aws-sdk/client-cognito-identity": "^3.1110.0",
+    "@aws-sdk/client-transcribe-streaming": "^3.1110.0",
+    "@aws-sdk/credential-provider-cognito-identity": "^3.972.67",
+    "chart.js": "^4.5.1"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.12"
+  }
+}
