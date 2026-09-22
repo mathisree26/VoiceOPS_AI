@@ -17,6 +17,7 @@ ________________________________________________________________________________
 
 -	[Overview](#overview)
 -	[System Architecture](#system-architecture)
+-	[VoiceOPS AI User flow](#voiceops-ai-user-flow)
 -	[Tech Stack](#tech-stack)
 -	[VoiceOPS AI Frontend](#voiceops-ai-frontend)
 -	[License](#license)
