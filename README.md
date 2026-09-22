@@ -19,11 +19,8 @@ Summer Hackathon Top 3 Winner!!
 ---
 
 AWS Rockstars Team:
-- Mathi Munikrishnan  [![LinkedIn](https://img.shields.io/badge/LinkedIn-Connect-blue?logo=linkedin)](https://www.linkedin.com/in/mathimunikrishnan)
-- Aishwarya Murali     [![LinkedIn](https://img.shields.io/badge/LinkedIn-Connect-blue?logo=linkedin)](https://www.linkedin.com/in/aishmurali)
-- Kavitha Vanguru       [![LinkedIn](https://img.shields.io/badge/LinkedIn-Connect-blue?logo=linkedin)](https://www.linkedin.com/in/kavithavanguru)
-- Prathyusha Reddy     [![LinkedIn](https://img.shields.io/badge/LinkedIn-Connect-blue?logo=linkedin)](https://www.linkedin.com/in/pratyusha-a-372bb9198)
-- Surendra Koripella   [![LinkedIn](https://img.shields.io/badge/LinkedIn-Connect-blue?logo=linkedin)](https://www.linkedin.com/in/surendra-koripella)
+
+<img src="img/team-combined.png" alt="AWS Rockstars Team" width="1200" />
 
 __________________________________________________________________________________________________________________________________
 
@@ -132,4 +129,3 @@ Polly then states the recommended next steps—roll back the deployment or upsca
 ## License
 
 This project is licensed under the MIT License. See LICENSE file for details.
-
