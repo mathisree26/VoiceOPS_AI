@@ -1,17 +1,5 @@
 # VoiceOPS_AI
 Voice-Driven AI Incident Commander for AWS Operations
-__________________________________________________________________________________________________________________________________
-
-VoiceOPS AI User flow:
-
-- VOICE INPUT: User prompts UI → Transcribe Streaming outputs text live.
-- API TRIGGER: Frontend submits transcript to API Gateway POST /command.
-- AGENT ORCHESTRATION: Lambda invokes Bedrock AgentCore Runtime.
-- TELEMETRY PROBE: Agent core executes tools to poll CloudWatch metrics and log groups.
-- CONTEXT HARVEST: Agent searches Bedrock Knowledge Base for architectural runbooks.
-- GEN-AI REASONING: Amazon Nova Foundation Model evaluates evidence vs. system context.
-- AUDIO PIPELINE: Lambda routes textual diagnosis to Amazon Polly for MP3 synthesis.
-- EXPERIENCE DELIVERY: UI displays explicit markdown analysis and reads audio aloud.
 
 __________________________________________________________________________________________________________________________________
 
@@ -102,6 +90,18 @@ Polly then states the recommended next steps—roll back the deployment or upsca
 
 <img width="1600" height="900" alt="image" src="https://github.com/user-attachments/assets/4ba124f9-39e1-44d2-80b4-42a695d94891" />
 
+__________________________________________________________________________________________________________________________________
+
+## VoiceOPS AI User flow:
+
+- VOICE INPUT: User prompts UI → Transcribe Streaming outputs text live.
+- API TRIGGER: Frontend submits transcript to API Gateway POST /command.
+- AGENT ORCHESTRATION: Lambda invokes Bedrock AgentCore Runtime.
+- TELEMETRY PROBE: Agent core executes tools to poll CloudWatch metrics and log groups.
+- CONTEXT HARVEST: Agent searches Bedrock Knowledge Base for architectural runbooks.
+- GEN-AI REASONING: Amazon Nova Foundation Model evaluates evidence vs. system context.
+- AUDIO PIPELINE: Lambda routes textual diagnosis to Amazon Polly for MP3 synthesis.
+- EXPERIENCE DELIVERY: UI displays explicit markdown analysis and reads audio aloud.
 
 ## Tech Stack
 
