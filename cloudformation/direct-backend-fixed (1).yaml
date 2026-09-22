@@ -1,0 +1,1016 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: VoiceOps demo - application-driven diagnostic backend using CloudWatch, Bedrock Knowledge Base, Nova Lite, and Polly
+
+Parameters:
+  Environment:
+    Type: String
+    Default: demo
+
+  KnowledgeBaseId:
+    Type: String
+    Description: KnowledgeBaseId output from knowledge-base.yaml
+
+  MetricNamespace:
+    Type: String
+    Default: VoiceOps/Demo
+
+  ApplicationLogGroupName:
+    Type: String
+    Default: /voiceops/demo/application
+
+  FoundationModelId:
+    Type: String
+    Default: amazon.nova-lite-v1:0
+
+  AllowedOrigin:
+    Type: String
+    Default: 'https://voiceopsaihackathon.dev'
+    Description: Browser origin allowed to call the VoiceOps HTTP API.
+
+  CognitoUserPoolId:
+    Type: String
+    Default: us-east-1_FSv9fcuXW
+    Description: Cognito User Pool ID used to authenticate VoiceOps users.
+
+  CognitoUserPoolClientId:
+    Type: String
+    Default: 14n6p3cldvnnf7vdgjvlaidt8c
+    Description: Cognito User Pool app client ID used as the JWT audience/client ID.
+
+  LookbackMinutes:
+    Type: Number
+    Default: 90
+    MinValue: 5
+    MaxValue: 1440
+
+Resources:
+  DiagnosticRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: VoiceOpsDiagnosticAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: ReadCloudWatchMetrics
+                Effect: Allow
+                Action:
+                  - cloudwatch:GetMetricData
+                  - cloudwatch:GetMetricStatistics
+                  - cloudwatch:ListMetrics
+                Resource: '*'
+
+              - Sid: ReadApplicationLogs
+                Effect: Allow
+                Action:
+                  - logs:FilterLogEvents
+                  - logs:GetLogEvents
+                  - logs:DescribeLogStreams
+                Resource: !Sub 'arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:${ApplicationLogGroupName}:*'
+
+              - Sid: RetrieveKnowledgeBase
+                Effect: Allow
+                Action:
+                  - bedrock:Retrieve
+                Resource: !Sub 'arn:${AWS::Partition}:bedrock:${AWS::Region}:${AWS::AccountId}:knowledge-base/${KnowledgeBaseId}'
+
+              - Sid: InvokeNova
+                Effect: Allow
+                Action:
+                  - bedrock:InvokeModel
+                Resource: !Sub 'arn:${AWS::Partition}:bedrock:${AWS::Region}::foundation-model/${FoundationModelId}'
+
+              - Sid: Polly
+                Effect: Allow
+                Action:
+                  - polly:SynthesizeSpeech
+                Resource: '*'
+
+  DiagnosticFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub 'voiceops-diagnostic-${Environment}'
+      Runtime: python3.12
+      Handler: index.lambda_handler
+      Timeout: 60
+      MemorySize: 512
+      Role: !GetAtt DiagnosticRole.Arn
+      Environment:
+        Variables:
+          KNOWLEDGE_BASE_ID: !Ref KnowledgeBaseId
+          METRIC_NAMESPACE: !Ref MetricNamespace
+          LOG_GROUP: !Ref ApplicationLogGroupName
+          MODEL_ID: !Ref FoundationModelId
+          LOOKBACK_MINUTES: !Ref LookbackMinutes
+      Code:
+        ZipFile: |
+          import base64
+          import boto3
+          import json
+          import os
+          import re
+          from datetime import datetime, timedelta, timezone
+
+          cloudwatch = boto3.client("cloudwatch")
+          logs = boto3.client("logs")
+          kb = boto3.client("bedrock-agent-runtime")
+          bedrock = boto3.client("bedrock-runtime")
+          polly = boto3.client("polly")
+
+          KB_ID = os.environ["KNOWLEDGE_BASE_ID"]
+          NAMESPACE = os.environ["METRIC_NAMESPACE"]
+          LOG_GROUP = os.environ["LOG_GROUP"]
+          MODEL_ID = os.environ["MODEL_ID"]
+          LOOKBACK = int(os.environ.get("LOOKBACK_MINUTES", "90"))
+
+          CHECKOUT_DEFAULT_METRICS = [
+              "Latency",
+              "ErrorRate"
+          ]
+
+          ORDER_WORKER_DEFAULT_METRICS = [
+              "Throttles",
+              "ConcurrentExecutions",
+              "ConcurrencyLimit"
+          ]
+
+          DASHBOARD_METRICS = {
+              "checkout-api": [
+                  "Latency",
+                  "ErrorRate",
+                  "TPS",
+                  "CPUUtilization",
+                  "MemoryUtilization"
+              ],
+              "order-worker": [
+                  "Invocations",
+                  "ConcurrentExecutions",
+                  "ConcurrencyLimit",
+                  "Throttles",
+                  "Duration"
+              ],
+              "payment-api": [
+                  "Latency",
+                  "ErrorRate",
+                  "TPS",
+                  "CPUUtilization",
+                  "MemoryUtilization"
+              ]
+          }
+
+          def metrics_for_question(service, question):
+              text = question.lower()
+
+              if service == "checkout-api":
+                  metrics = list(CHECKOUT_DEFAULT_METRICS)
+
+                  if "cpu" in text:
+                      metrics.append("CPUUtilization")
+
+                  if "memory" in text:
+                      metrics.append("MemoryUtilization")
+
+                  if "tps" in text or "throughput" in text or "requests per second" in text:
+                      metrics.append("TPS")
+
+                  return list(dict.fromkeys(metrics))
+
+              if service == "order-worker":
+                  metrics = list(ORDER_WORKER_DEFAULT_METRICS)
+
+                  if "invocation" in text or "invocations" in text:
+                      metrics.append("Invocations")
+
+                  if "duration" in text or "latency" in text:
+                      metrics.append("Duration")
+
+                  return list(dict.fromkeys(metrics))
+
+              return []
+
+          def api_response(status, body):
+              return {
+                  "statusCode": status,
+                  "headers": {"content-type": "application/json"},
+                  "body": json.dumps(body)
+              }
+
+          def get_metric(service, metric_name, start, end):
+              response = cloudwatch.get_metric_statistics(
+                  Namespace=NAMESPACE,
+                  MetricName=metric_name,
+                  Dimensions=[
+                      {"Name": "ServiceName", "Value": service}
+                  ],
+                  StartTime=start,
+                  EndTime=end,
+                  Period=300,
+                  Statistics=["Average", "Maximum"]
+              )
+
+              points = sorted(
+                  response.get("Datapoints", []),
+                  key=lambda x: x["Timestamp"]
+              )
+
+              if not points:
+                  return None
+
+              latest = points[-1]
+
+              return {
+                  "latest_average": round(float(latest.get("Average", 0)), 2),
+                  "latest_maximum": round(float(latest.get("Maximum", 0)), 2),
+                  "window_maximum": round(
+                      max(float(p.get("Maximum", 0)) for p in points),
+                      2
+                  ),
+                  "datapoints": len(points)
+              }
+
+          def get_metric_series(service, metric_name, start, end):
+              response = cloudwatch.get_metric_statistics(
+                  Namespace=NAMESPACE,
+                  MetricName=metric_name,
+                  Dimensions=[
+                      {"Name": "ServiceName", "Value": service}
+                  ],
+                  StartTime=start,
+                  EndTime=end,
+                  Period=300,
+                  Statistics=["Average", "Maximum"]
+              )
+
+              points = sorted(
+                  response.get("Datapoints", []),
+                  key=lambda x: x["Timestamp"]
+              )
+
+              return [
+                  {
+                      "timestamp": point["Timestamp"].isoformat(),
+                      "value": round(float(point.get("Maximum", point.get("Average", 0))), 2)
+                  }
+                  for point in points
+              ]
+
+          def latest_series_value(series):
+              if not series:
+                  return None
+              return series[-1].get("value")
+
+          def dashboard_status(service, latest_metrics):
+              if service == "checkout-api":
+                  latency = latest_metrics.get("Latency")
+                  error_rate = latest_metrics.get("ErrorRate")
+
+                  if error_rate is not None and error_rate >= 10:
+                      return "CRITICAL", "Elevated checkout error rate detected."
+
+                  if (
+                      (latency is not None and latency >= 300)
+                      or (error_rate is not None and error_rate >= 1)
+                  ):
+                      return "DEGRADED", "Checkout latency or error rate is above the service baseline."
+
+                  if latency is not None or error_rate is not None:
+                      return "HEALTHY", "Core checkout metrics are within the configured baseline."
+
+              if service == "payment-api":
+                  latency = latest_metrics.get("Latency")
+                  error_rate = latest_metrics.get("ErrorRate")
+
+                  if latency is not None or error_rate is not None:
+                      return "HEALTHY", "Service operating within normal thresholds."
+
+              if service == "order-worker":
+                  throttles = latest_metrics.get("Throttles")
+                  concurrency = latest_metrics.get("ConcurrentExecutions")
+                  limit = latest_metrics.get("ConcurrencyLimit")
+
+                  if throttles is not None and throttles > 0:
+                      return "DEGRADED", "Lambda throttling is present."
+
+                  if (
+                      concurrency is not None
+                      and limit not in (None, 0)
+                      and concurrency >= limit
+                  ):
+                      return "DEGRADED", "Lambda concurrency is at the configured limit."
+
+                  if any(value is not None for value in latest_metrics.values()):
+                      return "HEALTHY", "No throttling is present in the latest dashboard metrics."
+
+              return "NO_DATA", "No recent CloudWatch datapoints were found."
+
+          def get_services_payload():
+              end = datetime.now(timezone.utc)
+              start = end - timedelta(minutes=LOOKBACK)
+              services = []
+
+              for service in ("checkout-api", "order-worker", "payment-api"):
+                  series = {}
+                  latest_metrics = {}
+
+                  for metric_name in DASHBOARD_METRICS[service]:
+                      metric_series = get_metric_series(
+                          service,
+                          metric_name,
+                          start,
+                          end
+                      )
+
+                      if metric_series:
+                          series[metric_name] = metric_series
+                          latest_metrics[metric_name] = latest_series_value(metric_series)
+
+                  status, reason = dashboard_status(service, latest_metrics)
+
+                  services.append({
+                      "name": service,
+                      "status": status,
+                      "status_reason": reason,
+                      "metrics": latest_metrics,
+                      "series": series
+                  })
+
+              return {
+                  "source": "CloudWatch",
+                  "namespace": NAMESPACE,
+                  "generated_at": end.isoformat(),
+                  "lookback_minutes": LOOKBACK,
+                  "services": services
+              }
+
+          SUPPORTED_SERVICES = {"checkout-api", "order-worker"}
+          CONFIGURED_SERVICES = {"checkout-api", "order-worker", "payment-api"}
+
+          def normalize_service(value):
+              if not value:
+                  return None
+
+              normalized = str(value).strip().lower().replace("_", "-")
+              aliases = {
+                  "checkout": "checkout-api",
+                  "checkout api": "checkout-api",
+                  "checkout-api": "checkout-api",
+                  "order worker": "order-worker",
+                  "orderworker": "order-worker",
+                  "order-worker": "order-worker",
+                  "payment": "payment-api",
+                  "payment api": "payment-api",
+                  "payment-api": "payment-api",
+                  "payment service": "payment-api",
+                  "payment-service": "payment-api"
+              }
+
+              return aliases.get(normalized)
+
+          def infer_service_from_question(question):
+              text = question.lower().replace("_", "-")
+
+              has_checkout = (
+                  "checkout-api" in text
+                  or "checkout api" in text
+              )
+
+              has_order_worker = (
+                  "order-worker" in text
+                  or "order worker" in text
+                  or "orderworker" in text
+              )
+
+              has_payment = (
+                  "payment-api" in text
+                  or "payment api" in text
+                  or "payment-service" in text
+                  or "payment service" in text
+              )
+
+              # If both services are mentioned, do not force a single-service
+              # focus. None means global/multi-service scope in this Lambda.
+              if sum([has_checkout, has_order_worker, has_payment]) > 1:
+                  return None
+
+              if has_checkout:
+                  return "checkout-api"
+
+              if has_order_worker:
+                  return "order-worker"
+
+              if has_payment:
+                  return "payment-api"
+
+              return None
+
+          def resolve_focused_service(body, question):
+              explicit = (
+                  body.get("focused_service")
+                  or body.get("focusedService")
+                  or body.get("service")
+                  or body.get("service_name")
+              )
+
+              return normalize_service(explicit) or infer_service_from_question(question)
+
+          def detect_unsupported_service(question):
+              text = question.lower().replace("_", "-")
+
+              # Detect service-like names without treating unrelated questions
+              # as service requests. Known aliases are handled by the normal
+              # resolver; this only catches names such as inventory-api,
+              # shipping-service, inventory api, etc.
+              candidates = []
+
+              for match in re.findall(r"\b[a-z0-9][a-z0-9-]*(?:-api|-service)\b", text):
+                  candidates.append(match)
+
+              for match in re.findall(r"\b([a-z0-9][a-z0-9-]*)\s+(api|service)\b", text):
+                  candidates.append(f"{match[0]}-{match[1]}")
+
+              for candidate in candidates:
+                  normalized = normalize_service(candidate)
+                  if normalized in CONFIGURED_SERVICES:
+                      continue
+                  if candidate not in CONFIGURED_SERVICES:
+                      return candidate
+
+              return None
+
+          def get_live_metrics(start, end, question, focused_service=None):
+              if focused_service:
+                  result = {focused_service: {}}
+
+                  for name in metrics_for_question(focused_service, question):
+                      value = get_metric(focused_service, name, start, end)
+                      if value:
+                          result[focused_service][name] = value
+
+                  return result
+
+              # Global mode is intentionally conservative: use only the core
+              # incident metrics for each supported service.
+              result = {
+                  "checkout-api": {},
+                  "order-worker": {}
+              }
+
+              for service in ("checkout-api", "order-worker", "payment-api"):
+                  for name in metrics_for_question(service, question):
+                      value = get_metric(service, name, start, end)
+                      if value:
+                          result[service][name] = value
+
+              return result
+
+          def get_recent_logs(start, focused_service=None):
+              response = logs.filter_log_events(
+                  logGroupName=LOG_GROUP,
+                  startTime=int(start.timestamp() * 1000),
+                  limit=100
+              )
+
+              events = []
+
+              for event in response.get("events", []):
+                  message = event.get("message", "")
+
+                  try:
+                      parsed = json.loads(message)
+                  except Exception:
+                      parsed = {"message": message}
+
+                  if not focused_service:
+                      events.append(parsed)
+                      continue
+
+                  service = normalize_service(parsed.get("service"))
+                  dependency = normalize_service(parsed.get("dependency"))
+
+                  if focused_service == "checkout-api":
+                      # checkout-api incident evidence only. Exclude downstream
+                      # order-worker throttling records even though their caller
+                      # service field is checkout-api.
+                      if service == "checkout-api" and dependency != "order-worker":
+                          events.append(parsed)
+
+                  elif focused_service == "order-worker":
+                      # The throttling replay records identify checkout-api as
+                      # the caller and order-worker as the dependency, so either
+                      # representation belongs to the order-worker incident.
+                      if service == "order-worker" or dependency == "order-worker":
+                          events.append(parsed)
+
+              return events[-60:]
+
+          def build_retrieval_query(user_question, recent_logs, focused_service=None):
+              terms = []
+
+              if focused_service == "checkout-api":
+                  terms.extend([
+                      "checkout-api",
+                      "database connection pool exhaustion",
+                      "checkout high latency",
+                      "runbook",
+                      "recommended remediation",
+                      "operational guidance"
+                  ])
+              elif focused_service == "order-worker":
+                  terms.extend([
+                      "order-worker",
+                      "Lambda throttling concurrency limit",
+                      "runbook",
+                      "recommended remediation",
+                      "operational guidance"
+                  ])
+
+              for entry in recent_logs:
+                  error_type = entry.get("error_type")
+
+                  if error_type and error_type != "NONE":
+                      terms.append(str(error_type))
+
+              evidence = " ".join(list(dict.fromkeys(terms)))
+              return f"{user_question} {evidence}"[:1000]
+
+          def kb_item_blob(item):
+              text = item.get("content", {}).get("text", "")
+              location = json.dumps(item.get("location", {}), default=str)
+              return f"{text} {location}".lower()
+
+          def kb_item_matches_service(item, focused_service):
+              if not focused_service:
+                  return True
+
+              blob = kb_item_blob(item)
+
+              checkout_source_markers = (
+                  "checkout-service",
+                  "checkout-high-latency",
+                  "database-connection-runbook",
+                  "inc001"
+              )
+              order_source_markers = (
+                  "order-worker-service",
+                  "lambda-throttling-runbook",
+                  "inc002"
+              )
+
+              if focused_service == "checkout-api":
+                  if any(marker in blob for marker in order_source_markers):
+                      return False
+                  return any(marker in blob for marker in checkout_source_markers) or any(
+                      marker in blob for marker in (
+                          "checkout-api",
+                          "checkout api",
+                          "db_connection_timeout",
+                          "connection pool",
+                          "database connection"
+                      )
+                  )
+
+              if focused_service == "order-worker":
+                  if any(marker in blob for marker in checkout_source_markers):
+                      return False
+                  return any(marker in blob for marker in order_source_markers) or any(
+                      marker in blob for marker in (
+                          "order-worker",
+                          "order worker",
+                          "toomanyrequestsexception",
+                          "lambda throttling",
+                          "concurrency limit"
+                      )
+                  )
+
+              return True
+
+          def extract_kb_source(location):
+              try:
+                  uri = location.get("s3Location", {}).get("uri", "")
+                  if uri:
+                      return uri.rsplit("/", 1)[-1]
+              except Exception:
+                  pass
+              return "knowledge-base-chunk"
+
+          def retrieve_knowledge(query, focused_service=None):
+              response = kb.retrieve(
+                  knowledgeBaseId=KB_ID,
+                  retrievalQuery={"text": query},
+                  retrievalConfiguration={
+                      "vectorSearchConfiguration": {
+                          # Retrieve a few extra candidates, then enforce service
+                          # isolation before Nova sees the KB context.
+                          "numberOfResults": 10
+                      }
+                  }
+              )
+
+              results = []
+
+              for item in response.get("retrievalResults", []):
+                  text = item.get("content", {}).get("text", "")
+
+                  if not text or not kb_item_matches_service(item, focused_service):
+                      continue
+
+                  location = item.get("location", {})
+                  results.append({
+                      "text": text,
+                      "score": item.get("score"),
+                      "source": extract_kb_source(location),
+                      "location": location
+                  })
+
+                  if len(results) >= 6:
+                      break
+
+              return results
+
+          def diagnose(question, metrics, recent_logs, knowledge, focused_service=None):
+              scope_text = focused_service or "GLOBAL"
+              scope_rules = (
+                  "The diagnosis is FOCUSED on " + focused_service + ".\n"
+                  "- Diagnose ONLY this focused service/component.\n"
+                  "- Detailed/root-cause/full analysis changes DEPTH only; it must never expand service scope.\n"
+                  "- Ignore another service's metrics, logs, incidents, or runbooks.\n"
+                  "- For checkout-api, do not mention order-worker/Lambda throttling unless the supplied checkout-api LIVE EVIDENCE explicitly proves it is the direct cause.\n"
+                  "- For order-worker, do not diagnose checkout-api database exhaustion.\n"
+                  if focused_service
+                  else
+                  "The diagnosis is GLOBAL. Multiple incidents may be identified only when the supplied LIVE EVIDENCE supports them.\n"
+              ).replace("\n\n", "\n")
+
+              kb_guidance = [
+                  {
+                      "source": item.get("source", "knowledge-base-chunk"),
+                      "score": item.get("score"),
+                      "text": item.get("text", "")
+                  }
+                  for item in knowledge
+              ]
+
+              prompt = (
+                  "You are VoiceOps, an SRE incident diagnostic assistant.\n\n"
+                  "Use the supplied sources according to their roles. Do not blur the roles.\n\n"
+                  "SOURCE ROLE 1 - LIVE CLOUDWATCH METRICS:\n"
+                  "- Metrics are LIVE EVIDENCE of current service state.\n"
+                  "- Use them for current values, symptoms, severity, and trends only.\n"
+                  "- Do not derive remediation actions from metrics alone.\n\n"
+                  "SOURCE ROLE 2 - RECENT APPLICATION LOGS:\n"
+                  "- Logs are LIVE EVIDENCE of current errors, exceptions, and runtime symptoms.\n"
+                  "- Use them to support the current failure mode.\n"
+                  "- Do not turn log text into remediation unless the Knowledge Base guidance independently supports that remediation.\n\n"
+                  "SOURCE ROLE 3 - BEDROCK KNOWLEDGE BASE GUIDANCE:\n"
+                  "- Retrieved KB chunks are operational guidance: runbooks, service notes, and prior incident knowledge.\n"
+                  "- Use KB guidance for recommended actions, deeper explanation, and known failure-pattern interpretation.\n"
+                  "- A runbook is NOT proof that an incident is happening now; LIVE EVIDENCE must establish the current condition.\n"
+                  "- When relevant runbook guidance is present, recommended remediation MUST be grounded in it.\n"
+                  "- Do NOT invent rollback, deployment, configuration, scaling, or other remediation steps unless supported by the retrieved KB guidance.\n"
+                  "- If no relevant KB guidance is present, say that no matching runbook guidance was retrieved instead of inventing remediation.\n"
+                  "- If the live failure pattern remains the same across follow-up wording, keep the primary remediation anchored to the same matching runbook guidance.\n\n"
+                  "MISSING LIVE EVIDENCE BEHAVIOR:\n"
+                  "- If BOTH live metrics and recent logs contain no usable evidence for the requested service, use a neutral demo fallback instead of guessing.\n"
+                  "- Say that no active issues or current degradation are detected, without inventing healthy metric values.\n"
+                  "- Do not use a runbook or historical incident as proof of a current incident when live evidence is absent.\n\n"
+                  "DIAGNOSTIC SCOPE: " + scope_text + "\n"
+                  + scope_rules
+                  + "\nUSER QUESTION:\n"
+                  + question
+                  + "\n\nLIVE CLOUDWATCH METRICS:\n"
+                  + json.dumps(metrics, indent=2, default=str)
+                  + "\n\nRECENT APPLICATION LOGS:\n"
+                  + json.dumps(recent_logs, indent=2, default=str)
+                  + "\n\nBEDROCK KNOWLEDGE BASE GUIDANCE:\n"
+                  + json.dumps(kb_guidance, indent=2, default=str)
+                  + "\n\nRESPONSE RULES:\n"
+                  "- Answer ONLY the question the user asked. Do not automatically include diagnosis, evidence, and remediation together.\n"
+                  "- Output plain text only. Do not use Markdown syntax such as **, ##, backticks, or markdown tables.\n"
+                  "- Distinguish symptoms from likely root cause and never invent evidence.\n"
+                  "- For a diagnosis/status question such as 'why is this unhealthy?' or 'what is failing?', answer with the likely issue and the strongest LIVE EVIDENCE only. Do NOT include runbook guidance or recommended actions unless the user asks for them.\n"
+                  "- For a metric question such as latency, error rate, CPU, or memory, answer that metric question directly and do not add unrelated remediation.\n"
+                  "- For a runbook/remediation question such as 'what does the runbook recommend?', 'what should I do next?', 'how do I fix this?', or 'recommended actions', answer primarily from the retrieved BEDROCK KNOWLEDGE BASE GUIDANCE. Mention live evidence only briefly when needed to connect the runbook to the current failure.\n"
+                  "- For recommended actions, prefer the matching runbook's specific actions and ordering. Do not invent actions from metrics or logs.\n"
+                  "- For explanatory questions about a failure concept, use retrieved KB guidance for the deeper explanation while keeping current live facts separate.\n"
+                  "- Only when the user explicitly asks for detailed/full/deep/step-by-step analysis may you combine Root cause, Live evidence, and Runbook guidance in one fuller response.\n"
+                  "- Do not change the primary remediation merely because the user rephrased a follow-up question.\n"
+                  "- If the user asks for brief/short/quick, respond in at most 3 short lines. Otherwise keep normal answers concise, about 2-4 sentences.\n"
+                  "- Keep the answer suitable for text display and voice playback."
+              )
+
+              response = bedrock.converse(
+                  modelId=MODEL_ID,
+                  messages=[
+                      {
+                          "role": "user",
+                          "content": [{"text": prompt}]
+                      }
+                  ],
+                  inferenceConfig={
+                      "maxTokens": 700,
+                      "temperature": 0.1
+                  }
+              )
+
+              blocks = (
+                  response
+                  .get("output", {})
+                  .get("message", {})
+                  .get("content", [])
+              )
+
+              return "".join(
+                  block.get("text", "")
+                  for block in blocks
+                  if "text" in block
+              ).strip()
+
+          def unsupported_service_response(question, service_name):
+              prompt = (
+                  "You are VoiceOps, an SRE incident diagnostic assistant.\n\n"
+                  "The user asked about a service that is NOT configured in VoiceOps.\n"
+                  f"REQUESTED SERVICE: {service_name}\n"
+                  "SERVICE STATE: UNSUPPORTED / NOT ONBOARDED\n\n"
+                  "Do not diagnose this service. Do not mention checkout-api, order-worker, "
+                  "payment-api, or any unrelated telemetry. Do not invent service health.\n"
+                  "Explain naturally and concisely that this service is not currently configured "
+                  "for VoiceOps and that telemetry and operational runbooks have not been published yet. "
+                  "Suggest onboarding the service and publishing its runbooks as the next step.\n"
+                  "Use plain text only, no Markdown, in 1-3 short sentences.\n\n"
+                  f"USER QUESTION: {question}"
+              )
+
+              response = bedrock.converse(
+                  modelId=MODEL_ID,
+                  messages=[
+                      {
+                          "role": "user",
+                          "content": [{"text": prompt}]
+                      }
+                  ],
+                  inferenceConfig={
+                      "maxTokens": 180,
+                      "temperature": 0.1
+                  }
+              )
+
+              blocks = (
+                  response
+                  .get("output", {})
+                  .get("message", {})
+                  .get("content", [])
+              )
+
+              return "".join(
+                  block.get("text", "")
+                  for block in blocks
+                  if "text" in block
+              ).strip()
+
+          def synthesize(text):
+              response = polly.synthesize_speech(
+                  Engine="neural",
+                  OutputFormat="mp3",
+                  Text=text[:2900],
+                  VoiceId="Joanna"
+              )
+
+              return base64.b64encode(
+                  response["AudioStream"].read()
+              ).decode("utf-8")
+
+          def lambda_handler(event, context):
+              try:
+                  request_context = event.get("requestContext", {})
+                  http_context = request_context.get("http", {})
+                  method = http_context.get("method", "")
+                  path = event.get("rawPath") or http_context.get("path", "")
+
+                  if method == "GET" and path.endswith("/services"):
+                      return api_response(200, get_services_payload())
+
+                  body = event.get("body") or "{}"
+
+                  if event.get("isBase64Encoded"):
+                      body = base64.b64decode(body).decode("utf-8")
+
+                  if isinstance(body, str):
+                      body = json.loads(body)
+
+                  question = (
+                      body.get("transcript")
+                      or body.get("query")
+                      or body.get("prompt")
+                      or ""
+                  ).strip()
+
+                  if not question:
+                      return api_response(
+                          400,
+                          {"error": "Provide transcript, query, or prompt."}
+                      )
+
+                  requested_unsupported_service = detect_unsupported_service(question)
+
+                  if requested_unsupported_service:
+                      analysis = unsupported_service_response(
+                          question,
+                          requested_unsupported_service
+                      )
+                      audio = synthesize(analysis)
+
+                      return api_response(
+                          200,
+                          {
+                              "query": question,
+                              "focused_service": None,
+                              "requested_service": requested_unsupported_service,
+                              "analysis": analysis,
+                              "audio_mp3_base64": audio,
+                              "evidence": {
+                                  "scope": requested_unsupported_service,
+                                  "metrics": {},
+                                  "log_events_considered": 0,
+                                  "kb_results_considered": 0,
+                                  "kb_sources": []
+                              }
+                          }
+                      )
+
+                  focused_service = resolve_focused_service(body, question)
+
+                  end = datetime.now(timezone.utc)
+                  start = end - timedelta(minutes=LOOKBACK)
+
+                  if focused_service == "payment-api":
+                      payment_metrics = {}
+                      for metric_name in DASHBOARD_METRICS["payment-api"]:
+                          value = get_metric("payment-api", metric_name, start, end)
+                          if value is not None:
+                              payment_metrics[metric_name] = value
+
+                      if payment_metrics:
+                          analysis = "payment-api is healthy. No active degradation is detected in the current telemetry."
+                      else:
+                          analysis = "No recent payment-api telemetry is available in the current lookback window."
+
+                      audio = synthesize(analysis)
+
+                      return api_response(
+                          200,
+                          {
+                              "query": question,
+                              "focused_service": "payment-api",
+                              "analysis": analysis,
+                              "audio_mp3_base64": audio,
+                              "evidence": {
+                                  "scope": "payment-api",
+                                  "metrics": {"payment-api": payment_metrics},
+                                  "log_events_considered": 0,
+                                  "kb_results_considered": 0,
+                                  "kb_sources": []
+                              }
+                          }
+                      )
+
+                  metrics = get_live_metrics(start, end, question, focused_service)
+                  recent_logs = get_recent_logs(start, focused_service)
+
+                  retrieval_query = build_retrieval_query(
+                      question,
+                      recent_logs,
+                      focused_service
+                  )
+
+                  knowledge = retrieve_knowledge(retrieval_query, focused_service)
+
+                  analysis = diagnose(
+                      question,
+                      metrics,
+                      recent_logs,
+                      knowledge,
+                      focused_service
+                  )
+
+                  audio = synthesize(analysis)
+
+                  return api_response(
+                      200,
+                      {
+                          "query": question,
+                          "focused_service": focused_service,
+                          "analysis": analysis,
+                          "audio_mp3_base64": audio,
+                          "evidence": {
+                              "scope": focused_service or "global",
+                              "metrics": metrics,
+                              "log_events_considered": len(recent_logs),
+                              "kb_results_considered": len(knowledge),
+                              "kb_sources": list(dict.fromkeys(
+                                  item.get("source", "knowledge-base-chunk")
+                                  for item in knowledge
+                              ))
+                          }
+                      }
+                  )
+
+              except Exception as exc:
+                  print("ERROR:", repr(exc))
+                  return api_response(
+                      500,
+                      {"error": str(exc)}
+                  )
+
+  HttpApi:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      Name: !Sub 'voiceops-direct-api-${Environment}'
+      ProtocolType: HTTP
+      CorsConfiguration:
+        AllowOrigins:
+          - !Ref AllowedOrigin
+        AllowMethods:
+          - GET
+          - POST
+          - OPTIONS
+        AllowHeaders:
+          - content-type
+          - authorization
+
+  ApiIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref HttpApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !GetAtt DiagnosticFunction.Arn
+      PayloadFormatVersion: '2.0'
+
+  VoiceOpsJwtAuthorizer:
+    Type: AWS::ApiGatewayV2::Authorizer
+    Properties:
+      ApiId: !Ref HttpApi
+      Name: !Sub 'voiceops-${Environment}-jwt-authorizer'
+      AuthorizerType: JWT
+      IdentitySource:
+        - '$request.header.Authorization'
+      JwtConfiguration:
+        Audience:
+          - !Ref CognitoUserPoolClientId
+        Issuer: !Sub 'https://cognito-idp.${AWS::Region}.amazonaws.com/${CognitoUserPoolId}'
+
+  CommandRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: 'POST /command'
+      Target: !Sub 'integrations/${ApiIntegration}'
+      AuthorizationType: JWT
+      AuthorizerId: !Ref VoiceOpsJwtAuthorizer
+
+  ServicesRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: 'GET /services'
+      Target: !Sub 'integrations/${ApiIntegration}'
+      AuthorizationType: NONE
+
+  DefaultStage:
+    Type: AWS::ApiGatewayV2::Stage
+    Properties:
+      ApiId: !Ref HttpApi
+      StageName: '$default'
+      AutoDeploy: true
+
+  ApiInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref DiagnosticFunction
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub 'arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${HttpApi}/*/*'
+
+Outputs:
+  ApiEndpoint:
+    Description: Frontend POST /command endpoint.
+    Value: !Sub 'https://${HttpApi}.execute-api.${AWS::Region}.${AWS::URLSuffix}/command'
+
+  ServicesEndpoint:
+    Description: Public dashboard GET /services endpoint.
+    Value: !Sub 'https://${HttpApi}.execute-api.${AWS::Region}.${AWS::URLSuffix}/services'
+
+  DiagnosticFunctionName:
+    Value: !Ref DiagnosticFunction
+
+  JwtAuthorizerId:
+    Description: API Gateway JWT authorizer protecting POST /command.
+    Value: !Ref VoiceOpsJwtAuthorizer
