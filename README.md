@@ -20,6 +20,7 @@ ________________________________________________________________________________
 -	[VoiceOPS AI User flow](#voiceops-ai-user-flow)
 -	[Tech Stack](#tech-stack)
 -	[VoiceOPS AI Frontend](#voiceops-ai-frontend)
+-	[Author](#author)
 -	[License](#license)
 
 ## Overview
@@ -126,6 +127,17 @@ ________________________________________________________________________________
 
 <img width="521" height="574" alt="VoiceOPS AI webpage Screenshot" src="https://github.com/user-attachments/assets/57b13497-26fb-4124-b63e-740e5d7f74ba" />
 
+## Author
+
+**Mathi Munikrishnan** [![LinkedIn](https://img.shields.io/badge/LinkedIn-Connect-blue?logo=linkedin)](https://www.linkedin.com/in/mathimunikrishnan)
+
+**Aishwarya Murali** [![LinkedIn](https://img.shields.io/badge/LinkedIn-Connect-blue?logo=linkedin)](https://www.linkedin.com/in/aishmurali)
+
+**Kavitha Vanguru** [![LinkedIn](https://img.shields.io/badge/LinkedIn-Connect-blue?logo=linkedin)](https://www.linkedin.com/in/kavithavanguru)
+
+**Pratyusha Annam** [![LinkedIn](https://img.shields.io/badge/LinkedIn-Connect-blue?logo=linkedin)](https://www.linkedin.com/in/pratyusha-a-372bb9198)
+
+**Surendra Koripella** [![LinkedIn](https://img.shields.io/badge/LinkedIn-Connect-blue?logo=linkedin)](https://www.linkedin.com/in/surendra-koripella)
 
 ## License
 
